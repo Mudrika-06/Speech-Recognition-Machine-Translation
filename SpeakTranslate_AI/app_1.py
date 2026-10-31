@@ -6,8 +6,12 @@ import tempfile
 import os
 import io
 import csv
+import shutil
 
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSeq2SeqLM
+)
 
 
 # =========================================================
@@ -154,7 +158,16 @@ else:
 
 
 # =========================================================
-# 5. LOAD WHISPER MODEL
+# 5. CHECK FFMPEG
+# =========================================================
+
+def check_ffmpeg():
+
+    return shutil.which("ffmpeg") is not None
+
+
+# =========================================================
+# 6. LOAD WHISPER MODEL
 # =========================================================
 
 @st.cache_resource
@@ -167,7 +180,7 @@ def load_whisper_model():
 
 
 # =========================================================
-# 6. LOAD NLLB TRANSLATION MODEL
+# 7. LOAD NLLB TRANSLATION MODEL
 # =========================================================
 
 @st.cache_resource
@@ -194,14 +207,22 @@ def load_translation_model():
 
 
 # =========================================================
-# 7. SPEECH RECOGNITION
+# 8. SPEECH RECOGNITION
 # =========================================================
 
 def speech_to_text(
     audio_bytes,
     file_extension,
-    speech_mode="Automatic"
+    speech_mode="Automatic",
+    manual_language=None
 ):
+
+    if not check_ffmpeg():
+
+        raise FileNotFoundError(
+            "FFmpeg is not installed. Add ffmpeg to "
+            "packages.txt in the root of your repository."
+        )
 
     model = load_whisper_model()
 
@@ -215,6 +236,7 @@ def speech_to_text(
         ) as temporary_file:
 
             temporary_file.write(audio_bytes)
+
             temporary_path = temporary_file.name
 
         options = {
@@ -225,36 +247,20 @@ def speech_to_text(
         }
 
         # Manual language selection
-        if speech_mode in LANGUAGE_TO_WHISPER:
+        if speech_mode == "Manual Selection":
+
+            if manual_language not in LANGUAGE_TO_WHISPER:
+
+                raise ValueError(
+                    "The selected source language is not supported."
+                )
 
             options["language"] = (
-                LANGUAGE_TO_WHISPER[speech_mode]
+                LANGUAGE_TO_WHISPER[manual_language]
             )
 
-        # Hindi-English mixed speech
-        elif speech_mode == "Hindi-English Mixed":
-
-            options["language"] = "hi"
-
-            options["initial_prompt"] = (
-                "यह बातचीत हिंदी और English दोनों में है। "
-                "हिंदी शब्दों को देवनागरी में और English words "
-                "को English में लिखें। बोले गए शब्दों को "
-                "translate न करें।"
-            )
-
-        # English-Hindi mixed speech
-        elif speech_mode == "English-Hindi Mixed":
-
-            options["language"] = "en"
-
-            options["initial_prompt"] = (
-                "This conversation contains both English and Hindi. "
-                "Write Hindi words in Devanagari and English words "
-                "in English. Do not translate the spoken words."
-            )
-
-        # Automatic mode: no language hint
+        # Automatic language detection
+        # No language parameter is passed to Whisper.
 
         result = model.transcribe(
             temporary_path,
@@ -282,10 +288,10 @@ def speech_to_text(
 
 
 # =========================================================
-# 8. TEXT CHUNKING
+# 9. TEXT CHUNKING
 # =========================================================
 
-def split_text(text, max_characters=900):
+def split_text(text, max_characters=850):
 
     words = text.split()
 
@@ -301,18 +307,24 @@ def split_text(text, max_characters=900):
         else:
 
             if current_chunk.strip():
-                chunks.append(current_chunk.strip())
+
+                chunks.append(
+                    current_chunk.strip()
+                )
 
             current_chunk = word + " "
 
     if current_chunk.strip():
-        chunks.append(current_chunk.strip())
+
+        chunks.append(
+            current_chunk.strip()
+        )
 
     return chunks
 
 
 # =========================================================
-# 9. MACHINE TRANSLATION
+# 10. MACHINE TRANSLATION
 # =========================================================
 
 def translate_text(
@@ -348,9 +360,10 @@ def translate_text(
     source_code = LANGUAGES[source_language]
     target_code = LANGUAGES[target_language]
 
-    # Set source language before tokenization
+    # Set source language
     tokenizer.src_lang = source_code
 
+    # Get target language token
     target_token_id = tokenizer.convert_tokens_to_ids(
         target_code
     )
@@ -361,7 +374,7 @@ def translate_text(
     ):
 
         raise ValueError(
-            f"Invalid target language token: {target_code}"
+            f"Invalid target language code: {target_code}"
         )
 
     chunks = split_text(text)
@@ -408,7 +421,7 @@ def translate_text(
 
 
 # =========================================================
-# 10. SIDEBAR NAVIGATION
+# 11. SIDEBAR NAVIGATION
 # =========================================================
 
 st.sidebar.divider()
@@ -425,7 +438,7 @@ page = st.sidebar.radio(
 
 
 # =========================================================
-# 11. HOME PAGE
+# 12. HOME PAGE
 # =========================================================
 
 if page == "Home":
@@ -483,18 +496,17 @@ if page == "Home":
 
     st.divider()
 
-    # =================================================
+    # =====================================================
     # LANGUAGE SELECTION
-    # =================================================
+    # =====================================================
 
-    st.markdown("## 🌍 Language Selection")
+    st.markdown("## 🌍 Select Translation Languages")
 
+    # ONLY TWO OPTIONS
     source_mode = st.radio(
         "🎤 Select your speech type:",
         [
             "Automatic Detection",
-            "Hindi-English Mixed",
-            "English-Hindi Mixed",
             "Manual Selection"
         ],
         index=0
@@ -509,42 +521,29 @@ if page == "Home":
         if source_mode == "Manual Selection":
 
             manual_source_language = st.selectbox(
-                "Select Spoken Language",
+                "Source Language",
                 list(LANGUAGES.keys())
-            )
-
-        elif source_mode == "Hindi-English Mixed":
-
-            st.info(
-                "Hindi-dominant mixed speech selected."
-            )
-
-        elif source_mode == "English-Hindi Mixed":
-
-            st.info(
-                "English-dominant mixed speech selected."
             )
 
         else:
 
             st.info(
-                "Whisper will automatically detect "
-                "the spoken language."
+                "🔍 Source language will be detected automatically."
             )
 
     with col2:
 
         target_language = st.selectbox(
-            "🌐 Select Target Language",
+            "Target Language",
             list(LANGUAGES.keys()),
             index=list(LANGUAGES.keys()).index("Korean")
         )
 
     st.divider()
 
-    # =================================================
+    # =====================================================
     # TRANSCRIBE AND TRANSLATE BUTTON
-    # =================================================
+    # =====================================================
 
     if st.button(
         "🚀 Transcribe and Translate",
@@ -559,7 +558,7 @@ if page == "Home":
             )
 
         elif (
-            manual_source_language is not None
+            source_mode == "Manual Selection"
             and manual_source_language == target_language
         ):
 
@@ -573,23 +572,6 @@ if page == "Home":
 
                 audio_bytes = audio_file.getvalue()
 
-                # Choose Whisper mode
-                if source_mode == "Manual Selection":
-
-                    speech_mode = manual_source_language
-
-                elif source_mode == "Hindi-English Mixed":
-
-                    speech_mode = "Hindi-English Mixed"
-
-                elif source_mode == "English-Hindi Mixed":
-
-                    speech_mode = "English-Hindi Mixed"
-
-                else:
-
-                    speech_mode = "Automatic"
-
                 # STEP 1: SPEECH RECOGNITION
 
                 with st.spinner(
@@ -599,7 +581,8 @@ if page == "Home":
                     recognized_text, detected_code = speech_to_text(
                         audio_bytes,
                         audio_extension,
-                        speech_mode
+                        source_mode,
+                        manual_source_language
                     )
 
                 if not recognized_text:
@@ -612,20 +595,15 @@ if page == "Home":
                 else:
 
                     detected_language = (
-                        WHISPER_TO_LANGUAGE.get(detected_code)
+                        WHISPER_TO_LANGUAGE.get(
+                            detected_code,
+                            "Unknown"
+                        )
                     )
 
-                    # Determine the source language for NLLB
+                    # Determine actual source language
 
-                    if source_mode == "Hindi-English Mixed":
-
-                        actual_source_language = "Hindi"
-
-                    elif source_mode == "English-Hindi Mixed":
-
-                        actual_source_language = "English"
-
-                    elif source_mode == "Manual Selection":
+                    if source_mode == "Manual Selection":
 
                         actual_source_language = (
                             manual_source_language
@@ -637,40 +615,26 @@ if page == "Home":
                             detected_language
                         )
 
+                    # Check supported source language
+
                     if actual_source_language not in LANGUAGES:
 
                         st.error(
                             "The detected language is not supported "
                             "by this application's language list. "
-                            "Please select Manual Selection."
+                            "Please use Manual Selection."
                         )
 
                     else:
-
-                        # Show detected language
 
                         st.success(
                             "✅ Speech recognition completed!"
                         )
 
                         st.info(
-                            f"Whisper detected: "
-                            f"{detected_language or 'Unknown'}"
+                            f"🔍 Detected Language: "
+                            f"{detected_language}"
                         )
-
-                        if (
-                            source_mode in [
-                                "Hindi-English Mixed",
-                                "English-Hindi Mixed"
-                            ]
-                        ):
-
-                            st.warning(
-                                "Mixed-language recognition uses "
-                                "the selected primary language. "
-                                "Some words in the other language "
-                                "may need manual correction."
-                            )
 
                         # DISPLAY RECOGNIZED TEXT
 
@@ -679,11 +643,11 @@ if page == "Home":
                         st.text_area(
                             "Speech Recognition Output",
                             value=recognized_text,
-                            height=150,
+                            height=130,
                             key="current_recognized_text"
                         )
 
-                        # TRANSLATION
+                        # STEP 2: TRANSLATION
 
                         if actual_source_language == target_language:
 
@@ -691,7 +655,7 @@ if page == "Home":
 
                             st.warning(
                                 "Source and target languages are "
-                                "the same. No translation is needed."
+                                "the same. No translation is required."
                             )
 
                         else:
@@ -717,7 +681,7 @@ if page == "Home":
                         )
 
                         st.session_state.detected_language = (
-                            detected_language or "Unknown"
+                            detected_language
                         )
 
                         st.session_state.actual_source_language = (
@@ -742,15 +706,20 @@ if page == "Home":
 
                 st.exception(error)
 
-    # =================================================
+    # =====================================================
     # DISPLAY TRANSLATION RESULTS
-    # =================================================
+    # =====================================================
 
     if st.session_state.translated_text:
 
         st.divider()
 
         st.markdown("## 🌐 Translation Result")
+
+        st.write(
+            f"**Detected Language:** "
+            f"{st.session_state.detected_language}"
+        )
 
         st.write(
             f"**Source:** "
@@ -830,17 +799,15 @@ TRANSLATED TEXT:
 
         st.write(
             "Are you satisfied with the speech recognition "
-            "and translation? Share your experience!"
+            "and translation?"
         )
 
         if not st.session_state.feedback_submitted:
 
             with st.form("feedback_form"):
 
-                st.markdown("### ⭐ Rate Your Experience")
-
                 satisfaction = st.radio(
-                    "How satisfied are you?",
+                    "⭐ Rate Your Experience:",
                     [
                         "😍 Excellent",
                         "😊 Good",
@@ -895,7 +862,7 @@ TRANSLATED TEXT:
 
 
 # =========================================================
-# 12. ABOUT PROJECT
+# 13. ABOUT PROJECT
 # =========================================================
 
 elif page == "About Project":
@@ -909,8 +876,8 @@ elif page == "About Project":
         Recognition and Neural Machine Translation.
 
         It converts spoken audio into written text using
-        OpenAI Whisper and translates the recognized text
-        using Meta NLLB-200.
+        OpenAI Whisper and translates recognized text using
+        Meta NLLB-200.
         """
     )
 
@@ -921,9 +888,8 @@ elif page == "About Project":
         - 🎤 Audio upload and microphone recording.
         - 🗣️ Speech-to-text conversion.
         - 🔍 Automatic language detection.
-        - 🌍 Multilingual machine translation.
         - ✍️ Manual source-language selection.
-        - 🔀 Hindi-English mixed speech support.
+        - 🌍 Multilingual machine translation.
         - 📥 Downloadable translation reports.
         - 💬 Emoji-based user feedback.
         - 📊 Feedback dashboard.
@@ -949,7 +915,7 @@ elif page == "About Project":
 
 
 # =========================================================
-# 13. HOW IT WORKS
+# 14. HOW IT WORKS
 # =========================================================
 
 elif page == "How It Works":
@@ -998,7 +964,7 @@ elif page == "How It Works":
         Whisper Speech Recognition
              |
              v
-        Language Detection
+        Automatic / Manual Language Selection
              |
              v
         Recognized Text
@@ -1017,7 +983,7 @@ elif page == "How It Works":
 
 
 # =========================================================
-# 14. USER FEEDBACK DASHBOARD
+# 15. USER FEEDBACK DASHBOARD
 # =========================================================
 
 elif page == "User Feedback":
@@ -1113,7 +1079,7 @@ elif page == "User Feedback":
 
 
 # =========================================================
-# 15. FOOTER
+# 16. FOOTER
 # =========================================================
 
 st.divider()
