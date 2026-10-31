@@ -3,15 +3,15 @@ import whisper
 import torch
 import tempfile
 import os
-import csv
 import io
+import csv
 
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 
-# ==================================================
+# =====================================================
 # 1. PAGE CONFIGURATION
-# ==================================================
+# =====================================================
 
 st.set_page_config(
     page_title="SpeakTranslate AI",
@@ -23,37 +23,33 @@ st.title("🌐 SpeakTranslate AI")
 st.subheader("AI-Based Speech Recognition and Machine Translation")
 
 st.write(
-    "Convert spoken audio into written text and translate it "
-    "into another language using Artificial Intelligence."
+    "Convert spoken audio into text and translate it "
+    "into your preferred language using Artificial Intelligence."
 )
 
 
-# ==================================================
-# 2. SESSION STATE INITIALIZATION
-# ==================================================
+# =====================================================
+# 2. SESSION STATE
+# =====================================================
 
-if "recognized_text" not in st.session_state:
-    st.session_state.recognized_text = ""
+defaults = {
+    "recognized_text": "",
+    "translated_text": "",
+    "detected_language": "",
+    "actual_source_language": "",
+    "target_language": "",
+    "feedback_records": [],
+    "feedback_submitted": False
+}
 
-if "translated_text" not in st.session_state:
-    st.session_state.translated_text = ""
-
-if "actual_source_language" not in st.session_state:
-    st.session_state.actual_source_language = ""
-
-if "target_language" not in st.session_state:
-    st.session_state.target_language = ""
-
-if "feedback_records" not in st.session_state:
-    st.session_state.feedback_records = []
-
-if "feedback_submitted" not in st.session_state:
-    st.session_state.feedback_submitted = False
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 
-# ==================================================
+# =====================================================
 # 3. LANGUAGE CONFIGURATION
-# ==================================================
+# =====================================================
 
 LANGUAGES = {
     "English": "eng_Latn",
@@ -89,6 +85,8 @@ LANGUAGES = {
 }
 
 
+# Whisper language codes
+
 WHISPER_TO_LANGUAGE = {
     "en": "English",
     "hi": "Hindi",
@@ -123,41 +121,50 @@ WHISPER_TO_LANGUAGE = {
 }
 
 
-# ==================================================
+# Reverse mapping for manual language selection
+
+LANGUAGE_TO_WHISPER = {
+    language: code
+    for code, language in WHISPER_TO_LANGUAGE.items()
+}
+
+
+# =====================================================
 # 4. DEVICE CONFIGURATION
-# ==================================================
+# =====================================================
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-st.sidebar.header("⚙️ System Information")
-st.sidebar.write(f"**Processing device:** {DEVICE.upper()}")
+st.sidebar.markdown("## ⚙️ System Information")
+
+st.sidebar.write(
+    f"**Processing Device:** {DEVICE.upper()}"
+)
 
 if DEVICE == "cuda":
-    st.sidebar.success("GPU acceleration is available.")
+    st.sidebar.success("GPU acceleration enabled.")
 else:
     st.sidebar.info(
-        "CPU mode is active. Processing may take longer."
+        "CPU mode active. Processing may take longer."
     )
 
 
-# ==================================================
+# =====================================================
 # 5. LOAD WHISPER MODEL
-# ==================================================
+# =====================================================
 
 @st.cache_resource
 def load_whisper_model():
 
-    model = whisper.load_model(
+    return whisper.load_model(
         "base",
         device=DEVICE
     )
 
-    return model
 
-
-# ==================================================
+# =====================================================
 # 6. LOAD NLLB TRANSLATION MODEL
-# ==================================================
+# =====================================================
 
 @st.cache_resource
 def load_translation_model():
@@ -183,21 +190,19 @@ def load_translation_model():
     return tokenizer, model
 
 
-# ==================================================
-# 7. SPEECH-TO-TEXT FUNCTION
-# ==================================================
+# =====================================================
+# 7. SPEECH RECOGNITION
+# =====================================================
 
-def speech_to_text(audio_bytes, file_extension):
+def speech_to_text(audio_bytes, file_extension, manual_language=None):
 
     """
-    Convert audio into text using OpenAI Whisper.
+    Convert audio into text using Whisper.
 
-    Parameters:
-        audio_bytes: Audio file content.
-        file_extension: Original audio extension.
+    If manual_language is None, Whisper automatically
+    detects the spoken language.
 
-    Returns:
-        Recognized text and detected language code.
+    Otherwise, Whisper uses the selected language as a hint.
     """
 
     model = load_whisper_model()
@@ -214,23 +219,35 @@ def speech_to_text(audio_bytes, file_extension):
             temporary_file.write(audio_bytes)
             temporary_path = temporary_file.name
 
+        transcription_options = {
+            "task": "transcribe",
+            "fp16": DEVICE == "cuda"
+        }
+
+        # Apply language hint only in manual mode
+        if manual_language:
+
+            whisper_code = LANGUAGE_TO_WHISPER.get(
+                manual_language
+            )
+
+            if whisper_code:
+                transcription_options["language"] = whisper_code
+
         result = model.transcribe(
             temporary_path,
-            task="transcribe",
-            fp16=(DEVICE == "cuda")
+            **transcription_options
         )
 
         recognized_text = result.get(
-            "text",
-            ""
+            "text", ""
         ).strip()
 
-        detected_language = result.get(
-            "language",
-            ""
+        detected_code = result.get(
+            "language", ""
         )
 
-        return recognized_text, detected_language
+        return recognized_text, detected_code
 
     finally:
 
@@ -238,20 +255,14 @@ def speech_to_text(audio_bytes, file_extension):
             temporary_path
             and os.path.exists(temporary_path)
         ):
-
             os.remove(temporary_path)
 
 
-# ==================================================
-# 8. TEXT CHUNKING FUNCTION
-# ==================================================
+# =====================================================
+# 8. TEXT CHUNKING
+# =====================================================
 
 def split_text(text, max_characters=900):
-
-    """
-    Divide long text into smaller chunks
-    before sending it to the translation model.
-    """
 
     words = text.split()
 
@@ -260,10 +271,7 @@ def split_text(text, max_characters=900):
 
     for word in words:
 
-        if (
-            len(current_chunk) + len(word) + 1
-            <= max_characters
-        ):
+        if len(current_chunk) + len(word) + 1 <= max_characters:
 
             current_chunk += word + " "
 
@@ -280,36 +288,59 @@ def split_text(text, max_characters=900):
     return chunks
 
 
-# ==================================================
-# 9. MACHINE TRANSLATION FUNCTION
-# ==================================================
+# =====================================================
+# 9. MACHINE TRANSLATION
+# =====================================================
 
-def translate_text(
-    text,
-    source_language,
-    target_language
-):
+def translate_text(text, source_language, target_language):
 
     """
-    Translate recognized text using NLLB-200.
+    Translate text using NLLB-200.
+
+    IMPORTANT:
+    The tokenizer source language is explicitly set before
+    processing. The target language token is also specified
+    during generation.
     """
+
+    if not text.strip():
+        raise ValueError("There is no text available to translate.")
+
+    if source_language not in LANGUAGES:
+        raise ValueError("Unsupported source language.")
+
+    if target_language not in LANGUAGES:
+        raise ValueError("Unsupported target language.")
+
+    if source_language == target_language:
+        return text
 
     tokenizer, model = load_translation_model()
 
     source_code = LANGUAGES[source_language]
     target_code = LANGUAGES[target_language]
 
+    # Set the correct source language
     tokenizer.src_lang = source_code
 
-    text_chunks = split_text(text)
-
-    translated_chunks = []
-
+    # Get the target language token ID
     target_token_id = tokenizer.convert_tokens_to_ids(
         target_code
     )
 
-    for chunk in text_chunks:
+    if (
+        target_token_id is None
+        or target_token_id == tokenizer.unk_token_id
+    ):
+        raise ValueError(
+            f"Target language token not found: {target_code}"
+        )
+
+    chunks = split_text(text)
+
+    translated_chunks = []
+
+    for chunk in chunks:
 
         inputs = tokenizer(
             chunk,
@@ -325,28 +356,32 @@ def translate_text(
 
         with torch.inference_mode():
 
-            generated_tokens = model.generate(
+            output_tokens = model.generate(
                 **inputs,
                 forced_bos_token_id=target_token_id,
-                max_length=512,
-                num_beams=4
+                max_new_tokens=512,
+                num_beams=4,
+                early_stopping=True
             )
 
-        translated_text = tokenizer.batch_decode(
-            generated_tokens,
+        translated = tokenizer.batch_decode(
+            output_tokens,
             skip_special_tokens=True
-        )[0]
+        )[0].strip()
 
-        translated_chunks.append(
-            translated_text
-        )
+        if not translated:
+            raise ValueError(
+                "The translation model returned an empty result."
+            )
+
+        translated_chunks.append(translated)
 
     return " ".join(translated_chunks)
 
 
-# ==================================================
+# =====================================================
 # 10. SIDEBAR NAVIGATION
-# ==================================================
+# =====================================================
 
 st.sidebar.divider()
 
@@ -361,21 +396,20 @@ page = st.sidebar.radio(
 )
 
 
-# ==================================================
+# =====================================================
 # 11. HOME PAGE
-# ==================================================
+# =====================================================
 
 if page == "Home":
 
     st.markdown("## 🎤 Audio Input")
 
     st.write(
-        "Upload an existing audio file or record your voice "
-        "using the microphone."
+        "Upload an audio file or record your voice."
     )
 
     audio_source = st.radio(
-        "Choose audio input method:",
+        "Choose input method:",
         [
             "Upload Audio File",
             "Record Audio"
@@ -419,39 +453,54 @@ if page == "Home":
 
     st.divider()
 
-    # --------------------------------------------------
-    # LANGUAGE SELECTION
-    # --------------------------------------------------
+    # -------------------------------------------------
+    # SOURCE AND TARGET LANGUAGE
+    # -------------------------------------------------
 
     st.markdown("## 🌍 Language Selection")
+
+    source_mode = st.radio(
+        "How should the source language be selected?",
+        [
+            "Automatic Detection (Recommended)",
+            "Manual Selection"
+        ],
+        horizontal=True
+    )
+
+    manual_source_language = None
 
     col1, col2 = st.columns(2)
 
     with col1:
 
-        source_options = [
-            "Automatic Detection"
-        ] + list(LANGUAGES.keys())
+        if source_mode == "Manual Selection":
 
-        source_language = st.selectbox(
-            "Source Language",
-            source_options,
-            index=0
-        )
+            manual_source_language = st.selectbox(
+                "Select Spoken Language",
+                list(LANGUAGES.keys())
+            )
+
+        else:
+
+            st.info(
+                "Whisper will automatically identify "
+                "the language spoken in your audio."
+            )
 
     with col2:
 
         target_language = st.selectbox(
-            "Target Language",
+            "Select Target Language",
             list(LANGUAGES.keys()),
             index=1
         )
 
     st.divider()
 
-    # --------------------------------------------------
-    # TRANSCRIPTION AND TRANSLATION
-    # --------------------------------------------------
+    # -------------------------------------------------
+    # PROCESS AUDIO
+    # -------------------------------------------------
 
     if st.button(
         "🚀 Transcribe and Translate",
@@ -462,17 +511,16 @@ if page == "Home":
         if audio_file is None:
 
             st.warning(
-                "⚠️ Please upload an audio file "
-                "or record your voice first."
+                "⚠️ Please upload or record an audio file first."
             )
 
         elif (
-            source_language != "Automatic Detection"
-            and source_language == target_language
+            manual_source_language is not None
+            and manual_source_language == target_language
         ):
 
             st.warning(
-                "Please select two different languages."
+                "Source and target languages must be different."
             )
 
         else:
@@ -489,120 +537,125 @@ if page == "Home":
 
                     recognized_text, detected_code = speech_to_text(
                         audio_bytes,
-                        audio_extension
+                        audio_extension,
+                        manual_source_language
                     )
 
                 if not recognized_text:
 
                     st.error(
-                        "No speech could be recognized. "
+                        "No speech was recognized. "
                         "Please try another audio recording."
+                    )
+
+                    st.stop()
+
+                detected_language = WHISPER_TO_LANGUAGE.get(
+                    detected_code
+                )
+
+                # Determine the correct source language
+
+                if manual_source_language is not None:
+
+                    actual_source_language = (
+                        manual_source_language
                     )
 
                 else:
 
-                    detected_language = WHISPER_TO_LANGUAGE.get(
-                        detected_code
+                    actual_source_language = detected_language
+
+                if actual_source_language not in LANGUAGES:
+
+                    st.error(
+                        "The detected language is not in the "
+                        "available language list. Please use "
+                        "Manual Selection."
                     )
 
-                    # Determine source language
+                    st.stop()
 
-                    if source_language == "Automatic Detection":
+                st.success(
+                    "✅ Speech recognition completed!"
+                )
 
-                        if detected_language in LANGUAGES:
+                st.markdown("### 📝 Recognized Speech")
 
-                            actual_source_language = (
-                                detected_language
-                            )
+                st.info(
+                    f"**Whisper detected:** "
+                    f"{detected_language or 'Unknown'}"
+                )
 
-                        else:
+                if (
+                    manual_source_language
+                    and detected_language
+                    and manual_source_language != detected_language
+                ):
 
-                            st.error(
-                                "The detected language is not "
-                                "included in the available language "
-                                "list. Please select the source "
-                                "language manually."
-                            )
+                    st.warning(
+                        f"You selected {manual_source_language}, "
+                        f"but Whisper detected {detected_language}. "
+                        "Check whether the selected language matches "
+                        "the actual audio."
+                    )
 
-                            actual_source_language = None
+                st.text_area(
+                    "Recognized Text",
+                    value=recognized_text,
+                    height=150
+                )
 
-                    else:
+                # STEP 2: MACHINE TRANSLATION
 
-                        actual_source_language = source_language
+                if actual_source_language == target_language:
 
-                    if actual_source_language is not None:
+                    translated_text = recognized_text
 
-                        st.success(
-                            "✅ Speech recognition completed!"
-                        )
+                    st.warning(
+                        "Source and target languages are the same. "
+                        "No translation is needed."
+                    )
 
-                        st.markdown(
-                            "### 📝 Recognized Speech"
-                        )
+                else:
 
-                        st.info(
-                            f"Detected language: "
-                            f"{detected_language or 'Unknown'}"
-                        )
+                    with st.spinner(
+                        "🌐 Step 2/2: Translating text..."
+                    ):
 
-                        st.text_area(
-                            "Recognized Text",
-                            value=recognized_text,
-                            height=150
-                        )
-
-                        # STEP 2: MACHINE TRANSLATION
-
-                        if (
-                            actual_source_language
-                            == target_language
-                        ):
-
-                            translated_text = recognized_text
-
-                            st.warning(
-                                "Source and target languages "
-                                "are the same. The recognized text "
-                                "will be displayed without translation."
-                            )
-
-                        else:
-
-                            with st.spinner(
-                                "🌐 Step 2/2: Translating text..."
-                            ):
-
-                                translated_text = translate_text(
-                                    recognized_text,
-                                    actual_source_language,
-                                    target_language
-                                )
-
-                        st.success(
-                            "✅ Translation completed!"
-                        )
-
-                        # Save results in session state
-
-                        st.session_state.recognized_text = (
-                            recognized_text
-                        )
-
-                        st.session_state.translated_text = (
-                            translated_text
-                        )
-
-                        st.session_state.actual_source_language = (
-                            actual_source_language
-                        )
-
-                        st.session_state.target_language = (
+                        translated_text = translate_text(
+                            recognized_text,
+                            actual_source_language,
                             target_language
                         )
 
-                        # Reset feedback status for new conversion
+                st.success(
+                    "✅ Translation completed successfully!"
+                )
 
-                        st.session_state.feedback_submitted = False
+                # SAVE RESULTS
+
+                st.session_state.recognized_text = (
+                    recognized_text
+                )
+
+                st.session_state.translated_text = (
+                    translated_text
+                )
+
+                st.session_state.detected_language = (
+                    detected_language or "Unknown"
+                )
+
+                st.session_state.actual_source_language = (
+                    actual_source_language
+                )
+
+                st.session_state.target_language = (
+                    target_language
+                )
+
+                st.session_state.feedback_submitted = False
 
             except Exception as error:
 
@@ -612,9 +665,9 @@ if page == "Home":
 
                 st.exception(error)
 
-    # --------------------------------------------------
-    # DISPLAY SAVED CONVERSION RESULTS
-    # --------------------------------------------------
+    # -------------------------------------------------
+    # DISPLAY CONVERSION RESULTS
+    # -------------------------------------------------
 
     if st.session_state.translated_text:
 
@@ -638,7 +691,7 @@ if page == "Home":
             "Speech Recognition Output",
             value=st.session_state.recognized_text,
             height=120,
-            key="display_recognized_text"
+            key="recognized_output"
         )
 
         st.markdown("### 🌍 Translated Text")
@@ -647,24 +700,27 @@ if page == "Home":
             "Machine Translation Output",
             value=st.session_state.translated_text,
             height=160,
-            key="display_translated_text"
+            key="translated_output"
         )
 
-        # Download translated text
+        # DOWNLOAD TRANSLATION
 
         st.download_button(
-            label="⬇️ Download Translation",
+            "⬇️ Download Translation",
             data=st.session_state.translated_text,
             file_name="translated_text.txt",
             mime="text/plain",
             use_container_width=True
         )
 
-        # Create complete report
+        # DOWNLOAD COMPLETE REPORT
 
         report = f"""
 SPEAKTRANSLATE AI
 Speech Recognition and Machine Translation System
+
+Detected Language:
+{st.session_state.detected_language}
 
 Source Language:
 {st.session_state.actual_source_language}
@@ -672,7 +728,7 @@ Source Language:
 Target Language:
 {st.session_state.target_language}
 
-RECOGNIZED SPEECH:
+RECOGNIZED TEXT:
 {st.session_state.recognized_text}
 
 TRANSLATED TEXT:
@@ -680,36 +736,36 @@ TRANSLATED TEXT:
 """
 
         st.download_button(
-            label="📄 Download Complete Report",
+            "📄 Download Complete Report",
             data=report,
             file_name="speech_translation_report.txt",
             mime="text/plain",
             use_container_width=True
         )
 
-        # --------------------------------------------------
-        # USER FEEDBACK SECTION
-        # --------------------------------------------------
+        # -------------------------------------------------
+        # FEEDBACK SECTION
+        # -------------------------------------------------
 
         st.divider()
 
         st.markdown("## 💬 User Feedback")
 
         st.write(
-            "We value your opinion! Tell us whether you are "
-            "satisfied with the speech recognition and translation."
+            "Are you satisfied with the speech recognition "
+            "and translation? Share your experience!"
         )
 
         if not st.session_state.feedback_submitted:
 
-            with st.form("user_feedback_form"):
+            with st.form("feedback_form"):
 
                 st.markdown(
-                    "### ⭐ How satisfied are you with the conversion?"
+                    "### ⭐ Rate Your Experience"
                 )
 
                 satisfaction = st.radio(
-                    "Choose your experience:",
+                    "How satisfied are you?",
                     [
                         "😍 Excellent",
                         "😊 Good",
@@ -720,28 +776,24 @@ TRANSLATED TEXT:
                     horizontal=True
                 )
 
-                st.markdown(
-                    "### 📝 Share your experience"
-                )
-
-                feedback_comment = st.text_area(
-                    "Suggestions or comments (Optional)",
+                comment = st.text_area(
+                    "📝 Your Suggestions (Optional)",
                     placeholder=(
                         "Tell us how we can improve "
                         "SpeakTranslate AI..."
                     )
                 )
 
-                submitted = st.form_submit_button(
+                submit_feedback = st.form_submit_button(
                     "📩 Submit Feedback",
                     use_container_width=True
                 )
 
-                if submitted:
+                if submit_feedback:
 
                     feedback_record = {
                         "Satisfaction": satisfaction,
-                        "Comment": feedback_comment,
+                        "Comment": comment,
                         "Source Language": (
                             st.session_state.actual_source_language
                         ),
@@ -766,13 +818,13 @@ TRANSLATED TEXT:
 
             st.info(
                 "💙 Your opinion helps us improve "
-                "SpeakTranslate AI. Thank you for using our system! 🌍"
+                "SpeakTranslate AI. 🌍"
             )
 
 
-# ==================================================
-# 12. ABOUT PROJECT PAGE
-# ==================================================
+# =====================================================
+# 12. ABOUT PROJECT
+# =====================================================
 
 elif page == "About Project":
 
@@ -780,14 +832,13 @@ elif page == "About Project":
 
     st.write(
         """
-        SpeakTranslate AI is a multilingual speech recognition
-        and machine translation application developed using
-        Python and Artificial Intelligence.
+        SpeakTranslate AI is an Artificial Intelligence-based
+        multilingual application that combines Automatic Speech
+        Recognition and Neural Machine Translation.
 
-        The system converts spoken audio into written text
-        using Automatic Speech Recognition (ASR) and then
-        translates the recognized text into a selected target
-        language using Neural Machine Translation (NMT).
+        It converts spoken audio into written text using
+        OpenAI Whisper and translates the recognized text
+        using Meta NLLB-200.
         """
     )
 
@@ -796,13 +847,13 @@ elif page == "About Project":
     st.markdown(
         """
         - 🎤 Audio upload and microphone recording.
-        - 🗣️ Automatic speech recognition.
-        - 🌍 Multilingual text translation.
-        - 🔍 Automatic source language detection.
-        - ✍️ Manual source language selection.
-        - 📥 Downloadable translated output.
-        - 💬 Emoji-based user satisfaction feedback.
-        - 📝 User comments and suggestions.
+        - 🗣️ Speech-to-text conversion.
+        - 🔍 Automatic language detection.
+        - 🌍 Multilingual machine translation.
+        - ✍️ Manual source-language selection.
+        - 📥 Downloadable translation reports.
+        - 💬 Emoji-based user feedback.
+        - 📊 Feedback dashboard.
         """
     )
 
@@ -817,115 +868,102 @@ elif page == "About Project":
         | OpenAI Whisper | Speech recognition |
         | Meta NLLB-200 | Machine translation |
         | PyTorch | Deep learning framework |
-        | Hugging Face Transformers | AI model integration |
+        | Hugging Face | Model integration |
         | FFmpeg | Audio processing |
         | GitHub | Version control |
         """
     )
 
 
-# ==================================================
-# 13. HOW IT WORKS PAGE
-# ==================================================
+# =====================================================
+# 13. HOW IT WORKS
+# =====================================================
 
 elif page == "How It Works":
 
     st.title("⚙️ How SpeakTranslate AI Works")
 
+    st.markdown("### Stage 1: Audio Input")
+
     st.write(
-        "The application follows a two-stage AI processing workflow."
+        "The user uploads an audio file or records speech "
+        "using the microphone."
     )
 
-    st.markdown("### Stage 1: Speech Recognition")
+    st.markdown("### Stage 2: Speech Recognition")
 
     st.write(
-        """
-        The user uploads an audio file or records their voice.
-        OpenAI Whisper processes the audio and converts spoken
-        words into written text. It also identifies the spoken
-        language.
-        """
+        "OpenAI Whisper processes the audio, recognizes "
+        "the spoken words and identifies the source language."
     )
 
-    st.markdown("### Stage 2: Machine Translation")
+    st.markdown("### Stage 3: Machine Translation")
 
     st.write(
-        """
-        The recognized text is passed to the NLLB-200 model.
-        The model processes the source text and generates
-        its translated equivalent in the selected target language.
-        """
+        "NLLB-200 receives the recognized text along with "
+        "the correct source and target language codes "
+        "and generates the translated output."
     )
 
-    st.markdown("### Stage 3: User Feedback")
+    st.markdown("### Stage 4: User Feedback")
 
     st.write(
-        """
-        After receiving the translated output, the user can
-        provide feedback using emoji-based satisfaction ratings
-        and optional comments.
-        """
+        "Users can rate the conversion and share comments "
+        "to provide feedback about the system."
     )
 
     st.markdown("### 🔄 System Workflow")
 
     st.code(
         """
-        User Audio Input
-                |
-                v
-        Audio Preprocessing
-                |
-                v
+        Audio Input
+             |
+             v
+        Audio Processing
+             |
+             v
         Whisper Speech Recognition
-                |
-                v
+             |
+             v
+        Automatic Language Detection
+             |
+             v
         Recognized Text
-                |
-                v
-        Source Language Identification
-                |
-                v
+             |
+             v
         NLLB-200 Machine Translation
-                |
-                v
-        Translated Text
-                |
-                v
-        User Satisfaction Feedback
-                |
-                v
-        Feedback Record
+             |
+             v
+        Translated Output
+             |
+             v
+        User Feedback
         """,
         language="text"
     )
 
 
-# ==================================================
-# 14. USER FEEDBACK PAGE
-# ==================================================
+# =====================================================
+# 14. USER FEEDBACK DASHBOARD
+# =====================================================
 
 elif page == "User Feedback":
 
     st.title("💬 User Feedback Dashboard")
 
     st.write(
-        "View feedback submitted during the current application session."
+        "View feedback submitted during the current session."
     )
 
-    if st.session_state.feedback_records:
+    records = st.session_state.feedback_records
+
+    if records:
 
         st.success(
-            f"Total feedback responses: "
-            f"{len(st.session_state.feedback_records)}"
+            f"Total feedback responses: {len(records)}"
         )
 
-        # Display feedback records
-
-        for index, record in enumerate(
-            st.session_state.feedback_records,
-            start=1
-        ):
+        for index, record in enumerate(records, start=1):
 
             with st.expander(
                 f"Feedback #{index} - {record['Satisfaction']}"
@@ -941,22 +979,18 @@ elif page == "User Feedback":
                 )
 
                 st.write(
-                    f"**Source Language:** "
-                    f"{record['Source Language']}"
+                    f"**Source:** {record['Source Language']}"
                 )
 
                 st.write(
-                    f"**Target Language:** "
-                    f"{record['Target Language']}"
+                    f"**Target:** {record['Target Language']}"
                 )
-
-        # Satisfaction summary
 
         st.markdown("### 📊 Satisfaction Summary")
 
         rating_counts = {}
 
-        for record in st.session_state.feedback_records:
+        for record in records:
 
             rating = record["Satisfaction"]
 
@@ -966,11 +1000,9 @@ elif page == "User Feedback":
 
         for rating, count in rating_counts.items():
 
-            st.write(
-                f"{rating}: **{count} response(s)**"
-            )
+            st.write(f"{rating}: **{count} response(s)**")
 
-        # Download feedback as CSV
+        # CSV DOWNLOAD
 
         csv_buffer = io.StringIO()
 
@@ -987,13 +1019,10 @@ elif page == "User Feedback":
         )
 
         writer.writeheader()
-
-        writer.writerows(
-            st.session_state.feedback_records
-        )
+        writer.writerows(records)
 
         st.download_button(
-            label="📥 Download Feedback as CSV",
+            "📥 Download Feedback CSV",
             data=csv_buffer.getvalue(),
             file_name="speaktranslate_feedback.csv",
             mime="text/csv",
@@ -1004,14 +1033,13 @@ elif page == "User Feedback":
 
         st.info(
             "No feedback has been submitted yet. "
-            "Complete a conversion and submit your feedback "
-            "to see it here. 😊"
+            "Complete a conversion and submit feedback. 😊"
         )
 
 
-# ==================================================
+# =====================================================
 # 15. FOOTER
-# ==================================================
+# =====================================================
 
 st.divider()
 
