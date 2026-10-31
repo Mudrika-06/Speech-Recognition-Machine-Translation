@@ -1,1 +1,7 @@
-
+streamlit
+openai-whisper
+transformers
+torch
+sentencepiece
+safetensors
+accelerate
